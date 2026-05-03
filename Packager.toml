@@ -1,0 +1,13 @@
+identifier = "dev.typora-rust.app"
+productName = "Typora Rust"
+version = "0.1.0"
+beforePackagingCommand = "cargo build --release -p typora-app"
+
+[[binaries]]
+path = "target/release/typora-app"
+name = "typora-rust"
+main = true
+
+resources = ["assets"]
+icons = ["assets/icon.svg"]
+

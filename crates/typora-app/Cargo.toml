@@ -1,0 +1,21 @@
+[package]
+name = "typora-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "typora-app"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+floem.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+typora-core = { path = "../typora-core" }
+typora-md = { path = "../typora-md" }
+typora-platform = { path = "../typora-platform" }
+typora-render = { path = "../typora-render" }
+

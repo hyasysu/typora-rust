@@ -1,0 +1,15 @@
+[package]
+name = "typora-md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+comrak.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tree-sitter.workspace = true
+tree-sitter-markdown.workspace = true
+typora-core = { path = "../typora-core" }
+

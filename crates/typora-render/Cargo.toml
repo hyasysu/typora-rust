@@ -1,0 +1,20 @@
+[package]
+name = "typora-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+parley.workspace = true
+serde.workspace = true
+taffy.workspace = true
+typora-md = { path = "../typora-md" }
+
+[dev-dependencies]
+criterion.workspace = true
+typora-core = { path = "../typora-core" }
+
+[[bench]]
+name = "render_pipeline"
+harness = false
