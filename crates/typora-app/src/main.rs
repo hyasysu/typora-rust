@@ -5,6 +5,7 @@ use floem::action::{set_ime_allowed, set_ime_cursor_area};
 use floem::event::{Event, EventListener, EventPropagation};
 use floem::keyboard::{Key, Modifiers, NamedKey};
 use floem::kurbo::{Point, Size};
+use floem::Clipboard;
 use floem::peniko::Color;
 use floem::pointer::PointerButton;
 use floem::prelude::*;
@@ -82,19 +83,74 @@ impl AppModel {
     }
 
     fn apply_editor_command(&mut self, command: EditorCommand) {
-        match self.document.apply(command) {
-            Ok(CommandOutcome::Changed | CommandOutcome::Unchanged) => self.refresh_snapshot(),
-            Ok(CommandOutcome::SaveRequested) => self.save_current(),
-            Ok(CommandOutcome::SaveAsRequested(path)) => self.save_as(path),
-            Err(err) => tracing::warn!(?err, "editor command failed"),
+        // Debug logging to file
+        let debug_log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/Users/hujinxian/hya/code/typora-rust2/logs/editor.log")
+            .ok();
+        if let Some(mut file) = debug_log {
+            use std::io::Write;
+            let _ = writeln!(file, "apply_editor_command: {:?}", command);
+        }
+
+        match command {
+            EditorCommand::Copy => {
+                if let Some(text) = self.document.selected_text() {
+                    match Clipboard::set_contents(text) {
+                        Ok(_) => tracing::info!("Copied to clipboard"),
+                        Err(e) => tracing::warn!("Failed to copy: {:?}", e),
+                    }
+                }
+            }
+            EditorCommand::Cut => {
+                if let Some(text) = self.document.selected_text() {
+                    match Clipboard::set_contents(text) {
+                        Ok(_) => tracing::info!("Cut to clipboard"),
+                        Err(e) => tracing::warn!("Failed to copy for cut: {:?}", e),
+                    }
+                }
+                // Now perform the cut
+                match self.document.apply(command) {
+                    Ok(CommandOutcome::Changed | CommandOutcome::Unchanged) => self.refresh_snapshot(),
+                    Ok(CommandOutcome::SaveRequested) => self.save_current(),
+                    Ok(CommandOutcome::SaveAsRequested(path)) => self.save_as(path),
+                    Err(err) => tracing::warn!(?err, "editor command failed"),
+                }
+            }
+            EditorCommand::Paste(_) => {
+                // Get text from clipboard
+                match Clipboard::get_contents() {
+                    Ok(text) => {
+                        let paste_cmd = EditorCommand::Paste(text);
+                        match self.document.apply(paste_cmd) {
+                            Ok(CommandOutcome::Changed | CommandOutcome::Unchanged) => self.refresh_snapshot(),
+                            Ok(CommandOutcome::SaveRequested) => self.save_current(),
+                            Ok(CommandOutcome::SaveAsRequested(path)) => self.save_as(path),
+                            Err(err) => tracing::warn!(?err, "editor command failed"),
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to get clipboard contents: {:?}", e),
+                }
+            }
+            _ => {
+                match self.document.apply(command) {
+                    Ok(CommandOutcome::Changed | CommandOutcome::Unchanged) => self.refresh_snapshot(),
+                    Ok(CommandOutcome::SaveRequested) => self.save_current(),
+                    Ok(CommandOutcome::SaveAsRequested(path)) => self.save_as(path),
+                    Err(err) => tracing::warn!(?err, "editor command failed"),
+                }
+            }
         }
     }
 
+    #[allow(dead_code)]
     fn move_cursor_to_local_point(&mut self, point: Point, wrap_columns: usize) {
         let position = text_position_from_local_point(&self.document, point, wrap_columns);
         self.apply_editor_command(EditorCommand::MoveCursor(CursorMove::ToPosition(position)));
     }
 
+    #[allow(dead_code)]
     fn open_via_dialog(&mut self) {
         let Some(path) = choose_markdown_open_path() else {
             return;
@@ -149,8 +205,9 @@ impl AppModel {
 
 fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()))
         .init();
+    unsafe { std::env::set_var("RUST_LOG", "debug"); }
     floem::launch(app_view);
 }
 
@@ -258,13 +315,27 @@ fn app_view() -> impl IntoView {
                 Size::new(2.0, SOURCE_LINE_HEIGHT),
             );
             model.update(|model| {
-                model.move_cursor_to_local_point(
+                let position = text_position_from_local_point(
+                    &model.document,
                     point_inside_source_text(pointer_event.pos),
                     source_wrap_columns.get_untracked(),
                 );
+                let char_idx = model.document.position_to_char(position);
+                // Set both anchor and head to clicked position
+                model.document.selection.anchor = char_idx;
+                model.document.selection.head = char_idx;
             });
             EventPropagation::Stop
         })
+        .on_event(EventListener::PointerMove, move |event| {
+            let Event::PointerMove(_pointer_event) = event else {
+                return EventPropagation::Continue;
+            };
+            // For now, we only update selection during pointer move if explicitly needed
+            // Drag selection is typically tracked via pointer capture
+            EventPropagation::Stop
+        })
+        .on_event(EventListener::PointerUp, move |_| EventPropagation::Stop)
         .on_event(EventListener::ImePreedit, move |event| {
             if let Event::ImePreedit { text, .. } = event {
                 model.update(|model| {
@@ -378,10 +449,35 @@ fn key_event_to_command(event: &Event) -> Option<UiCommand> {
     };
     let modifiers = key_event.modifiers;
     let primary = primary_modifier(modifiers);
+    let shift = modifiers.shift();
+
+    // Debug logging to file
+    let debug_log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/Users/hujinxian/hya/code/typora-rust2/logs/editor.log")
+        .ok();
+    if let Some(mut file) = debug_log {
+        use std::io::Write;
+        let _ = writeln!(file, "key_event: {:?}, primary: {}, shift: {}", key_event.key.logical_key, primary, shift);
+    }
 
     if primary {
         return match &key_event.key.logical_key {
+            Key::Character(ch) if ch.eq_ignore_ascii_case("c") => {
+                tracing::debug!("Copy command");
+                Some(UiCommand::Edit(EditorCommand::Copy))
+            }
+            Key::Character(ch) if ch.eq_ignore_ascii_case("x") => {
+                tracing::debug!("Cut command");
+                Some(UiCommand::Edit(EditorCommand::Cut))
+            }
+            Key::Character(ch) if ch.eq_ignore_ascii_case("v") => {
+                tracing::debug!("Paste command");
+                Some(UiCommand::Edit(EditorCommand::Paste(String::new())))
+            }
             Key::Character(ch) if ch.eq_ignore_ascii_case("a") => {
+                tracing::debug!("SelectAll command");
                 Some(UiCommand::Edit(EditorCommand::SelectAll))
             }
             Key::Character(ch) if ch.eq_ignore_ascii_case("s") => Some(UiCommand::Save),
@@ -398,36 +494,68 @@ fn key_event_to_command(event: &Event) -> Option<UiCommand> {
         };
     }
 
-    match &key_event.key.logical_key {
-        Key::Named(NamedKey::Backspace) => Some(UiCommand::Edit(EditorCommand::DeleteBackward)),
-        Key::Named(NamedKey::Enter) => {
-            Some(UiCommand::Edit(EditorCommand::InsertText("\n".to_string())))
+    // Shift + Arrow for selection extension
+    if shift {
+        tracing::debug!("Shift pressed, checking arrow keys");
+        match &key_event.key.logical_key {
+            Key::Named(NamedKey::ArrowLeft) => {
+                tracing::debug!("ExtendSelection Left");
+                Some(UiCommand::Edit(
+                    EditorCommand::ExtendSelection(CursorMove::Left),
+                ))
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                tracing::debug!("ExtendSelection Right");
+                Some(UiCommand::Edit(
+                    EditorCommand::ExtendSelection(CursorMove::Right),
+                ))
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                tracing::debug!("ExtendSelection Up");
+                Some(UiCommand::Edit(EditorCommand::ExtendSelection(
+                    CursorMove::Up,
+                )))
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                tracing::debug!("ExtendSelection Down");
+                Some(UiCommand::Edit(
+                    EditorCommand::ExtendSelection(CursorMove::Down),
+                ))
+            }
+            _ => None,
         }
-        Key::Named(NamedKey::ArrowLeft) => {
-            Some(UiCommand::Edit(EditorCommand::MoveCursor(CursorMove::Left)))
+    } else {
+        match &key_event.key.logical_key {
+            Key::Named(NamedKey::Backspace) => Some(UiCommand::Edit(EditorCommand::DeleteBackward)),
+            Key::Named(NamedKey::Enter) => {
+                Some(UiCommand::Edit(EditorCommand::InsertText("\n".to_string())))
+            }
+            Key::Named(NamedKey::ArrowLeft) => {
+                Some(UiCommand::Edit(EditorCommand::MoveCursor(CursorMove::Left)))
+            }
+            Key::Named(NamedKey::ArrowRight) => Some(UiCommand::Edit(EditorCommand::MoveCursor(
+                CursorMove::Right,
+            ))),
+            Key::Named(NamedKey::ArrowUp) => {
+                Some(UiCommand::Edit(EditorCommand::MoveCursor(CursorMove::Up)))
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                Some(UiCommand::Edit(EditorCommand::MoveCursor(CursorMove::Down)))
+            }
+            Key::Named(NamedKey::Home) => Some(UiCommand::Edit(EditorCommand::MoveCursor(
+                CursorMove::LineStart,
+            ))),
+            Key::Named(NamedKey::End) => Some(UiCommand::Edit(EditorCommand::MoveCursor(
+                CursorMove::LineEnd,
+            ))),
+            Key::Named(NamedKey::Space) => {
+                Some(UiCommand::Edit(EditorCommand::InsertText(" ".to_string())))
+            }
+            Key::Character(ch) if !modifiers.control() && !modifiers.alt() && !modifiers.meta() => {
+                Some(UiCommand::Edit(EditorCommand::InsertText(ch.to_string())))
+            }
+            _ => None,
         }
-        Key::Named(NamedKey::ArrowRight) => Some(UiCommand::Edit(EditorCommand::MoveCursor(
-            CursorMove::Right,
-        ))),
-        Key::Named(NamedKey::ArrowUp) => {
-            Some(UiCommand::Edit(EditorCommand::MoveCursor(CursorMove::Up)))
-        }
-        Key::Named(NamedKey::ArrowDown) => {
-            Some(UiCommand::Edit(EditorCommand::MoveCursor(CursorMove::Down)))
-        }
-        Key::Named(NamedKey::Home) => Some(UiCommand::Edit(EditorCommand::MoveCursor(
-            CursorMove::LineStart,
-        ))),
-        Key::Named(NamedKey::End) => Some(UiCommand::Edit(EditorCommand::MoveCursor(
-            CursorMove::LineEnd,
-        ))),
-        Key::Named(NamedKey::Space) => {
-            Some(UiCommand::Edit(EditorCommand::InsertText(" ".to_string())))
-        }
-        Key::Character(ch) if !modifiers.control() && !modifiers.alt() && !modifiers.meta() => {
-            Some(UiCommand::Edit(EditorCommand::InsertText(ch.to_string())))
-        }
-        _ => None,
     }
 }
 

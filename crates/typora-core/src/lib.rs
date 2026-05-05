@@ -111,12 +111,16 @@ pub enum EditorCommand {
     DeleteBackward,
     DeleteSelection,
     MoveCursor(CursorMove),
+    ExtendSelection(CursorMove),
     SetSelection(Selection),
     SelectAll,
     Undo,
     Redo,
     Save,
     SaveAs(PathBuf),
+    Copy,
+    Cut,
+    Paste(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -211,6 +215,28 @@ impl DocumentState {
         line.trim_end_matches(['\r', '\n']).chars().count()
     }
 
+    /// Returns the text in the given byte-index range.
+    #[must_use]
+    pub fn text_range(&self, range: Range<usize>) -> String {
+        let len = self.char_count();
+        let start = range.start.min(len);
+        let end = range.end.min(len);
+        if start >= end {
+            return String::new();
+        }
+        self.rope.slice(start..end).to_string()
+    }
+
+    /// Returns the currently selected text, or None if the selection is empty (caret only).
+    #[must_use]
+    pub fn selected_text(&self) -> Option<String> {
+        let range = self.selection.normalized();
+        if range.is_empty() {
+            return None;
+        }
+        Some(self.text_range(range))
+    }
+
     pub fn set_path(&mut self, path: PathBuf) {
         self.path = Some(path);
     }
@@ -236,6 +262,10 @@ impl DocumentState {
                 self.move_cursor(movement);
                 Ok(CommandOutcome::Unchanged)
             }
+            EditorCommand::ExtendSelection(movement) => {
+                self.extend_selection(movement);
+                Ok(CommandOutcome::Unchanged)
+            }
             EditorCommand::SetSelection(selection) => {
                 self.set_selection(selection)?;
                 Ok(CommandOutcome::Unchanged)
@@ -251,6 +281,23 @@ impl DocumentState {
             EditorCommand::Redo => Ok(self.redo()),
             EditorCommand::Save => Ok(CommandOutcome::SaveRequested),
             EditorCommand::SaveAs(path) => Ok(CommandOutcome::SaveAsRequested(path)),
+            EditorCommand::Copy => {
+                // Clipboard copy is handled by the app layer
+                Ok(CommandOutcome::Unchanged)
+            }
+            EditorCommand::Cut => {
+                let range = self.selection.normalized();
+                if !range.is_empty() {
+                    self.push_undo();
+                    self.rope.remove(range.clone());
+                    self.selection = Selection::caret(range.start);
+                    self.mark_changed();
+                    Ok(CommandOutcome::Changed)
+                } else {
+                    Ok(CommandOutcome::Unchanged)
+                }
+            }
+            EditorCommand::Paste(text) => self.insert_text(&text),
         }
     }
 
@@ -385,6 +432,55 @@ impl DocumentState {
             CursorMove::ToPosition(position) => self.position_to_char(position),
         };
         self.selection = Selection::caret(next);
+    }
+
+    fn extend_selection(&mut self, movement: CursorMove) {
+        let head = self.selection.head;
+        // Compute next head position based on movement
+        let next = match movement {
+            CursorMove::Left => head.saturating_sub(1),
+            CursorMove::Right => (head + 1).min(self.char_count()),
+            CursorMove::Up => {
+                let pos = self.char_to_position(head);
+                if pos.line == 0 {
+                    0
+                } else {
+                    self.position_to_char(TextPosition {
+                        line: pos.line - 1,
+                        character: pos.character,
+                    })
+                }
+            }
+            CursorMove::Down => {
+                let pos = self.char_to_position(head);
+                if pos.line + 1 >= self.line_count() {
+                    self.char_count()
+                } else {
+                    self.position_to_char(TextPosition {
+                        line: pos.line + 1,
+                        character: pos.character,
+                    })
+                }
+            }
+            CursorMove::LineStart => {
+                let pos = self.char_to_position(head);
+                self.position_to_char(TextPosition {
+                    line: pos.line,
+                    character: 0,
+                })
+            }
+            CursorMove::LineEnd => {
+                let pos = self.char_to_position(head);
+                self.position_to_char(TextPosition {
+                    line: pos.line,
+                    character: self.line_visible_char_count(pos.line),
+                })
+            }
+            CursorMove::DocumentStart => 0,
+            CursorMove::DocumentEnd => self.char_count(),
+            CursorMove::ToPosition(position) => self.position_to_char(position),
+        };
+        self.selection.head = next;
     }
 
     fn push_undo(&mut self) {
@@ -539,5 +635,84 @@ mod tests {
             doc.apply(EditorCommand::Save).unwrap(),
             CommandOutcome::SaveRequested
         );
+    }
+
+    #[test]
+    fn selected_text_returns_none_for_empty_selection() {
+        let doc = DocumentState::from_text("hello");
+        assert!(doc.selected_text().is_none());
+    }
+
+    #[test]
+    fn selected_text_returns_selected_content() {
+        let mut doc = DocumentState::from_text("hello world");
+        doc.apply(EditorCommand::SetSelection(Selection {
+            anchor: 0,
+            head: 5,
+        }))
+        .unwrap();
+        assert_eq!(doc.selected_text(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn text_range_returns_correct_substring() {
+        let doc = DocumentState::from_text("hello world");
+        assert_eq!(doc.text_range(0..5), "hello");
+        assert_eq!(doc.text_range(6..11), "world");
+        assert_eq!(doc.text_range(0..0), "");
+    }
+
+    #[test]
+    fn extend_selection_moves_head_keeping_anchor() {
+        let mut doc = DocumentState::from_text("hello world");
+        doc.apply(EditorCommand::SetSelection(Selection {
+            anchor: 0,
+            head: 5,
+        }))
+        .unwrap();
+
+        doc.apply(EditorCommand::ExtendSelection(CursorMove::Right))
+            .unwrap();
+        assert_eq!(doc.selection.anchor, 0);
+        assert_eq!(doc.selection.head, 6);
+
+        doc.apply(EditorCommand::ExtendSelection(CursorMove::Left))
+            .unwrap();
+        assert_eq!(doc.selection.anchor, 0);
+        assert_eq!(doc.selection.head, 5);
+    }
+
+    #[test]
+    fn extend_selection_with_unicode() {
+        let mut doc = DocumentState::from_text("a中文b");
+        doc.apply(EditorCommand::SetSelection(Selection {
+            anchor: 1,
+            head: 1,
+        }))
+        .unwrap();
+
+        doc.apply(EditorCommand::ExtendSelection(CursorMove::Right))
+            .unwrap();
+        assert_eq!(doc.selection.head, 2);
+
+        doc.apply(EditorCommand::ExtendSelection(CursorMove::Right))
+            .unwrap();
+        assert_eq!(doc.selection.head, 3);
+    }
+
+    #[test]
+    fn delete_after_cut_removes_selected_text() {
+        let mut doc = DocumentState::from_text("hello world");
+        doc.apply(EditorCommand::SetSelection(Selection {
+            anchor: 0,
+            head: 5,
+        }))
+        .unwrap();
+
+        let cut_text = doc.selected_text().unwrap();
+        assert_eq!(cut_text, "hello");
+
+        doc.apply(EditorCommand::DeleteSelection).unwrap();
+        assert_eq!(doc.text(), " world");
     }
 }

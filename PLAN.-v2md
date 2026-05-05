@@ -1,0 +1,44 @@
+# Typora Rust V2: Native Editor Surface
+
+## Summary
+V2 focuses on replacing the left-pane label renderer with a real `EditorView` while preserving the current document core, parser snapshot, preview text, file open/save, and status bar behavior. The release target is a usable native Markdown source editor with mouse selection, copy/cut/paste, IME typing, viewport-based line painting, and basic Markdown highlighting.
+
+## Key Changes
+- Add a custom Floem `EditorView` for the source pane and wire it inside `scroll(editor_view).on_scroll(...)`; remove the current `label(source_text)` plus separate caret overlay.
+- Keep text ownership in `typora-core::DocumentState`; `EditorView` only paints, hit-tests, and dispatches `EditorCommand`s through `AppModel`.
+- Add a small editor layout helper that computes wrapped visual rows from document lines, pane width, `SOURCE_FONT_SIZE = 15`, `SOURCE_LINE_HEIGHT = 22`, Menlo, and `TAB_WIDTH = 4`.
+- Paint only rows intersecting the scroll viewport, using `floem::text::TextLayout` per visible row/segment and `PaintCx` rectangles for selection and caret.
+- Add mouse drag selection: pointer down sets anchor/head, pointer move extends head, pointer up finalizes. Hit testing must round-trip through Unicode-safe char indices.
+- Add clipboard commands:
+  - `Cmd/Ctrl+C`: copy selected text if selection is non-empty.
+  - `Cmd/Ctrl+X`: copy then delete selection.
+  - `Cmd/Ctrl+V`: insert clipboard text at selection/caret.
+  - Empty/unavailable clipboard is a no-op with tracing warning, not a panic.
+- Add basic Markdown highlighting from `MarkdownSnapshot` block spans:
+  - Body: `#1F2328`
+  - Heading text: `#0A6B75`, bold weight
+  - Code fence/block text: `#6F42C1`
+  - List/task markers: `#0969DA`
+  - Quote marker/text accent: `#57606A`
+  - Selection: `#BBD7FF`; caret remains black
+- Preserve IME preedit/commit behavior and update `set_ime_cursor_area` from the painted caret rectangle.
+- Preserve preview refresh on document version changes; preview rendering itself is not upgraded in V2.
+
+## API And Type Changes
+- In `typora-core`, add `EditorCommand::ExtendSelection(CursorMove)` so Shift+Arrow and mouse drag can extend `head` while keeping `anchor`.
+- In `typora-core`, add `DocumentState::text_range(Range<usize>) -> String` and `DocumentState::selected_text() -> Option<String>` for clipboard operations.
+- In `typora-app`, add internal `EditorView`, `EditorLayout`, and `VisualLine` types. These are app-private and should not change workspace crate public APIs.
+- Keep existing `EditorCommand::SetSelection`, `SelectAll`, `InsertText`, `DeleteSelection`, `Undo`, `Redo`, `Save`, and `SaveAs` semantics.
+
+## Test Plan
+- Add core unit tests for `selected_text`, `text_range`, `ExtendSelection`, Unicode selection, copy-range boundaries, and delete-after-cut behavior.
+- Add app/layout tests for visual-row wrapping, viewport row filtering, point-to-position mapping, caret rect calculation, and selection rectangles across wrapped and multi-line Unicode text.
+- Add key mapping tests for `Cmd/Ctrl+C`, `Cmd/Ctrl+X`, `Cmd/Ctrl+V`, Shift+Arrow extension, and existing save/undo/redo/select-all shortcuts.
+- Add highlighting tests that map headings, code blocks, lists, tasks, and quotes to expected style classes/colors from `MarkdownSnapshot`.
+- Run `cargo test --workspace --all-targets`.
+- Manual smoke test with `cargo run -p typora-app -- /tmp/sample.md`: type ASCII/Chinese, drag select across lines, copy/cut/paste, undo/redo, save, and scroll a large Markdown document without rendering the whole file.
+
+## Assumptions
+- V2 remains macOS-first but uses the existing primary-modifier helper for cross-platform keyboard behavior.
+- No new crates are required; use existing Floem renderer/text and `floem::Clipboard`.
+- Full inline Markdown syntax highlighting, multi-cursor editing, find/replace, preview rendering overhaul, and packaging/version bump are out of scope for this V2 plan.
