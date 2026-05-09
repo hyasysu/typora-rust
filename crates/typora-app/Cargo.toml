@@ -12,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 floem.workspace = true
+floem-editor-core.workspace = true
+lapce-xi-rope.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 typora-core = { path = "../typora-core" }

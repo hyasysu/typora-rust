@@ -4718,6 +4718,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "floem",
+ "floem-editor-core",
+ "lapce-xi-rope",
  "tracing",
  "tracing-subscriber",
  "typora-core",
